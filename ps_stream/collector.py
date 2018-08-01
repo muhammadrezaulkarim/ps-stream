@@ -10,7 +10,7 @@ from twisted.web import resource, server
 
 from .utils import element_to_obj
 
-
+logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
 
 
@@ -35,6 +35,11 @@ class PSStreamCollector(resource.Resource):
         The following URL describes the PeopleSoft Rowset-Based Message Format.
         http://docs.oracle.com/cd/E66686_01/pt855pbr1/eng/pt/tibr/concept_PeopleSoftRowset-BasedMessageFormat-0764fb.html
         """
+        log.debug('To: {}, From: {}, MessageName: {}'.format(
+                request.getHeader('To'),
+                request.getHeader('From'),
+                request.getHeader('MessageName')))
+
         if self.authorize_f and not self.authorize_f(request):
             request.setResponseCode(403, message='Forbidden')
             log.info('Unauthorized message received')
@@ -46,7 +51,7 @@ class PSStreamCollector(resource.Resource):
 
         assert(request.getHeader('DataChunk') == '1')
         assert(request.getHeader('DataChunkCount') == '1')
-
+        
         psft_message_name = None
         field_types = None
 
