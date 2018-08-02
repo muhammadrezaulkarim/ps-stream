@@ -12,6 +12,7 @@ from .utils import element_to_obj
 
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
+import traceback
 
 
 class PSStreamCollector(resource.Resource):
@@ -40,6 +41,10 @@ class PSStreamCollector(resource.Resource):
                 request.getHeader('From'),
                 request.getHeader('MessageName')))
 
+        #request.content.seek(0, 0)
+        #log.debug(request.content.read())
+        
+        
         if self.authorize_f and not self.authorize_f(request):
             request.setResponseCode(403, message='Forbidden')
             log.info('Unauthorized message received')
@@ -47,44 +52,68 @@ class PSStreamCollector(resource.Resource):
                 request.getHeader('To'),
                 request.getHeader('From'),
                 request.getHeader('MessageName')))
+            
+            transaction_id = request.getHeader('TransactionID')
+            log.debug('Message not accepted by collector due to authorization for Transaction id:' + str(transaction_id))
             return 'Message not accepted by collector.'.encode('utf-8')
 
         assert(request.getHeader('DataChunk') == '1')
         assert(request.getHeader('DataChunkCount') == '1')
         
+        log.debug('Message accepted by collector...')
+        
         psft_message_name = None
         field_types = None
+        
+        try:
+            
+            transaction_id = request.getHeader('TransactionID')
+            orig_time_stamp = request.getHeader('OrigTimeStamp')
+            
+            log.debug('Transaction id:' + str(transaction_id))
+            log.debug('DataChunk:' + str(request.getHeader('DataChunk')))
+            log.debug('DataChunkCount:' + str(request.getHeader('DataChunkCount')))
 
-        transaction_id = request.getHeader('TransactionID')
-        orig_time_stamp = request.getHeader('OrigTimeStamp')
+            # Parse the root element for the PeopleSoft message name and FieldTypes
+            request.content.seek(0, 0)
+            for event, e in ElementTree.iterparse(request.content, events=('start', 'end')):
+                if event == 'start' and psft_message_name is None:
+                    psft_message_name = e.tag.split('}', 1)[-1]
+                elif event == 'end' and e.tag.split('}', 1)[-1] == 'FieldTypes':
+                    field_types = element_to_obj(e, value_f=field_type)
+                    break
 
-        # Parse the root element for the PeopleSoft message name and FieldTypes
-        request.content.seek(0, 0)
-        for event, e in ElementTree.iterparse(request.content, events=('start', 'end')):
-            if event == 'start' and psft_message_name is None:
-                psft_message_name = e.tag.split('}', 1)[-1]
-            elif event == 'end' and e.tag.split('}', 1)[-1] == 'FieldTypes':
-                field_types = element_to_obj(e, value_f=field_type)
-                break
+            # Rescan for transactions, removing read elements to reduce memory usage
+            transaction_index = 1
+            request.content.seek(0, 0)
+            for event, e in ElementTree.iterparse(request.content, events=('end',)):
+                if e.tag.split('}', 1)[-1] == 'Transaction':
+                    transaction = ElementTree.tostring(e, encoding='unicode')
+                    message = {
+                        'TransactionID': transaction_id,
+                        'TransactionIndex': transaction_index,
+                        'OrigTimeStamp': orig_time_stamp,
+                        'CollectTimeStamp': datetime.now(pytz.utc).astimezone().isoformat(),
+                        'Transaction': transaction
+                    }
+                    message_str = json.dumps(message)
+                    self.producer.produce(self.topic, message_str, transaction_id)
+                    e.clear()
+                    transaction_index += 1
 
-        # Rescan for transactions, removing read elements to reduce memory usage
-        transaction_index = 1
-        request.content.seek(0, 0)
-        for event, e in ElementTree.iterparse(request.content, events=('end',)):
-            if e.tag.split('}', 1)[-1] == 'Transaction':
-                transaction = ElementTree.tostring(e, encoding='unicode')
-                message = {
-                    'TransactionID': transaction_id,
-                    'TransactionIndex': transaction_index,
-                    'OrigTimeStamp': orig_time_stamp,
-                    'CollectTimeStamp': datetime.now(pytz.utc).astimezone().isoformat(),
-                    'Transaction': transaction
-                }
-                message_str = json.dumps(message)
-                self.producer.produce(self.topic, message_str, transaction_id)
-                e.clear()
-                transaction_index += 1
-        self.producer.flush()
+            self.producer.flush()
+        
+        except Exception as e:
+            log.debug(f'Exception class: {e.__class__.__name__} Details: {traceback.format_exc()}')
+            log.debug(message_str)
+            log.debug('Transaction index:' + str(transaction_index))
+            log.debug('DataChunk:' + str(request.getHeader('DataChunk')))
+            log.debug('DataChunkCount:' + str(request.getHeader('DataChunkCount')))
+            
+            request.setResponseCode(400, message='Error in processing the request message.')
+            return 'Error in processing the request message.'.encode('utf-8')
+            
+            
 
         return '{"status":"POST ok"}'.encode('utf-8')
 
